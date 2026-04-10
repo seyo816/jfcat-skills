@@ -3,9 +3,13 @@
 set -euo pipefail
 
 # 固定版本（仅脚本内，无环境变量）
-_JFCAT_CLI_VER=0.1.0
+_JFCAT_CLI_VER=0.2.1
 
 CHROMEDATA_ROOT="${JFCAT_CHROMEDATA_ROOT:-$HOME/.chromedata}"
+# 支持 JFCAT_CHROMEDATA_ROOT=~/foo
+if [[ "${CHROMEDATA_ROOT:0:1}" == "~" ]]; then
+  CHROMEDATA_ROOT="${CHROMEDATA_ROOT/#\~/$HOME}"
+fi
 
 # 若路径存在且可执行（Windows .exe 在 Git Bash 下 -x 通常可用）
 _chrome_executable() {
@@ -128,8 +132,14 @@ jfcat-cli $_JFCAT_CLI_VER
 
 用法:
   jfcat-cli [-h | --help] [-v | --version]
-  jfcat-cli browser start <profile> [-p <端口>]
+  jfcat-cli browser start <profile> [-p [<端口>]]
   jfcat-cli browser stop <profile>
+  jfcat-cli browser list [-all]
+  jfcat-cli browser online [-all]
+  jfcat-cli cdp list [-p <端口> | <端口>] [-H <host>]
+  jfcat-cli cdp run -p <端口> [-i <pick>] [-H <host>] <action> [params-json|@file|-]
+  jfcat-cli cdp raw -p <端口> [-i <pick>] [-H <host>] <CDP.method> [params-json|-]
+  jfcat-cli cdp help-actions
 
 全局选项:
   -h, --help      显示本帮助
@@ -137,14 +147,36 @@ jfcat-cli $_JFCAT_CLI_VER
 
 子命令 browser:
   start   使用 ~/.chromedata/<profile> 作为用户数据目录启动 Chrome。
-          -p <端口>  开启远程调试（remote-debugging-port）；不传 -p 则不启用调试端口。
+          -p        开启远程调试并自动选用 JFCAT_DEBUG_PORT_MIN～MAX 内空闲端口（默认 9222～9322）。
+          -p <端口>  指定 remote-debugging-port；不传 -p 则不启用调试端口。
+          若该 profile 已有 Chrome 在使用同一数据目录，则不再启动新进程，直接退出（0）。
           启动时会尽量恢复上次会话标签页（--restore-last-session，且依赖同一 profile）。
+          默认后台启动，命令立即返回；需要占住终端并看 Chrome 日志时设 JFCAT_BROWSER_FOREGROUND=1。
 
   stop    结束使用该 profile 数据目录的 Chrome 进程。
 
+  list    默认等同 ls <数据根>；加 -all 时列出子项详情（目录=profile：online、pids、debug、opened、
+          last_closed；文件则 kind=file）。
+
+  online  默认每行一个 profile 名称；加 -all 才含 opened / last_closed 等（opened 用 ps 最早 lstart，
+          解析失败则用 start 写入的 .jfcat-cli-session-started）。macOS 已改用 ps command= 以识别进程。
+
 环境变量:
-  JFCAT_CHROMEDATA_ROOT  数据根目录，默认 ~/.chromedata
-  JFCAT_CHROME           Chrome 可执行文件（可选；不设则自动探测 macOS / Linux / Windows）
+  JFCAT_CHROMEDATA_ROOT   数据根目录，默认 ~/.chromedata
+  JFCAT_CHROME            Chrome 可执行文件（可选；不设则自动探测 macOS / Linux / Windows）
+  JFCAT_BROWSER_FOREGROUND  设为 1 时 start 使用 exec 前台启动（默认后台）
+  JFCAT_LIST_LS_FLAGS      传给 list 的额外 ls 参数（如 -1 每行一个）
+  JFCAT_DEBUG_PORT_MIN     start -p 自动选端口时下界（默认 9222）
+  JFCAT_DEBUG_PORT_MAX     start -p 自动选端口时上界（默认 9322）
+
+子命令 cdp（Chrome DevTools Protocol）:
+  需本机 Node.js 18+；Chrome 须带 --remote-debugging-port（如 browser start -p）。
+  原子操作与扩展 src/background/index.ts 中 bb-browser / executeBbBrowserAction 对齐（蛇形 JSON）。
+  list      拉取 /json/list（含 webSocketDebuggerUrl）。
+  run       高阶 action：click、fill、select、eval、screenshot、snapshot、press、scroll 等。
+  raw       透传任意 CDP 方法，如 Runtime.evaluate、Page.navigate。
+  help-actions  打印全部 action 与 params 说明。
+  未覆盖项（依赖 chrome.* 扩展 API）: tab_list/history/network 路由/console/errors/trace/frame 等。
 EOF
 }
 
@@ -157,9 +189,13 @@ browser_start() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -p)
-        [[ $# -ge 2 ]] || { echo "jfcat-cli: -p 需要端口号" >&2; exit 1; }
-        port="$2"
-        shift 2
+        if [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]]; then
+          port="$2"
+          shift 2
+        else
+          port="__AUTO__"
+          shift
+        fi
         ;;
       -*)
         echo "jfcat-cli: 未知选项: $1" >&2
@@ -183,7 +219,19 @@ browser_start() {
   local chrome user_data
   chrome="$(chrome_bin)"
   user_data="${CHROMEDATA_ROOT}/${profile}"
+
+  if _profile_chrome_running "$profile"; then
+    echo "jfcat-cli: profile=$profile 已有 Chrome 使用 user-data-dir=$user_data，跳过启动（请直接使用已打开实例）"
+    return 0
+  fi
+
+  if [[ "$port" == "__AUTO__" ]]; then
+    port="$(_pick_free_tcp_port)" || exit 1
+    echo "jfcat-cli: 已选用空闲调试端口 $port"
+  fi
+
   mkdir -p "$user_data"
+  date -u +'%Y-%m-%dT%H:%M:%SZ' >"${user_data}/${_JFCAT_SESSION_STARTED_FILE}"
 
   local args=(
     "--user-data-dir=$user_data"
@@ -196,11 +244,335 @@ browser_start() {
   fi
 
   echo "jfcat-cli: 启动 Chrome profile=$profile user-data-dir=$user_data${port:+  remote-debugging-port=$port}"
-  exec "$chrome" "${args[@]}"
+  if [[ "${JFCAT_BROWSER_FOREGROUND:-}" == "1" ]]; then
+    exec "$chrome" "${args[@]}"
+  fi
+  # 后台启动：终端立即返回；关闭浏览器时不再占住当前 shell（此前 exec 会继承 stdio 并长期挂起）
+  nohup "$chrome" "${args[@]}" </dev/null >/dev/null 2>&1 &
+  local chrome_pid=$!
+  disown "$chrome_pid" 2>/dev/null || true
+  echo "jfcat-cli: 已在后台启动 (PID=$chrome_pid)"
 }
 
 _regex_escape() {
   printf '%s' "$1" | sed 's/[.^$*+?()[{|\\]/\\&/g'
+}
+
+# 是否已有 Chrome 使用该 profile 的 user-data-dir（与 stop 规则一致）
+_profile_chrome_running() {
+  local profile="$1" user_data esc pattern
+  user_data="${CHROMEDATA_ROOT}/${profile}"
+  esc="$(_regex_escape "$user_data")"
+  pattern="user-data-dir=${esc}([[:space:]]|$)"
+  pgrep -f "$pattern" &>/dev/null
+}
+
+_tcp_port_listening() {
+  local p="$1"
+  command -v lsof &>/dev/null || return 1
+  lsof -nP -iTCP:"$p" -sTCP:LISTEN &>/dev/null
+}
+
+_pick_free_tcp_port() {
+  local lo="${JFCAT_DEBUG_PORT_MIN:-9222}" hi="${JFCAT_DEBUG_PORT_MAX:-9322}" p
+  for ((p=lo; p<=hi; p++)); do
+    if ! _tcp_port_listening "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  echo "jfcat-cli: 在 ${lo}-${hi} 内未找到空闲 TCP 端口（可调整 JFCAT_DEBUG_PORT_MIN/MAX）" >&2
+  return 1
+}
+
+browser_list() {
+  local show_all=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -all|--all)
+        show_all=1
+        shift
+        ;;
+      -*)
+        echo "jfcat-cli: 未知选项: $1（list 仅支持 -all）" >&2
+        exit 1
+        ;;
+      *)
+        echo "jfcat-cli: list 不需要其它参数" >&2
+        exit 1
+        ;;
+    esac
+  done
+  if [[ ! -d "$CHROMEDATA_ROOT" ]]; then
+    echo "jfcat-cli: 数据根目录不存在: $CHROMEDATA_ROOT" >&2
+    exit 1
+  fi
+  if [[ "$show_all" -eq 0 ]]; then
+    command ls ${JFCAT_LIST_LS_FLAGS:-} "${CHROMEDATA_ROOT}"
+    return 0
+  fi
+
+  local merged path name prof plist dbg opened closed r
+  merged="$(mktemp "${TMPDIR:-/tmp}/jfcat-cli-list-all.XXXXXX")"
+  _browser_write_online_merged_file "$merged"
+
+  echo "jfcat-cli: 数据根=$CHROMEDATA_ROOT"
+  echo "jfcat-cli: list -all：未运行 profile 显示 online=n；last_closed 来自 browser stop" >&2
+
+  while IFS= read -r path; do
+    [[ -e "$path" ]] || continue
+    name="${path##*/}"
+    if [[ ! -d "$path" ]]; then
+      printf '%s\tkind=file\n' "$name"
+      continue
+    fi
+    prof="$name"
+    r="$(awk -F '\t' -v p="$prof" '$1 == p { print $2 "\t" $3; exit }' "$merged")"
+    plist="${r%%$'\t'*}"
+    dbg=""
+    [[ "$r" == *$'\t'* ]] && dbg="${r#*$'\t'}"
+    if [[ -n "$plist" ]]; then
+      opened="$(_earliest_opened_iso "$plist")"
+      [[ -z "$opened" ]] && opened="$(_read_session_started "$prof")"
+      closed="$(_read_last_closed "$prof")"
+      printf '%s\tonline=y\tpids=%s' "$prof" "$plist"
+      if [[ -n "$dbg" && "$dbg" != "0" ]]; then
+        printf '\tdebug=%s' "$dbg"
+      else
+        printf '\tdebug=-'
+      fi
+      printf '\topened=%s\tlast_closed=%s\n' "${opened:-}" "${closed:-}"
+    else
+      opened="$(_read_session_started "$prof")"
+      closed="$(_read_last_closed "$prof")"
+      printf '%s\tonline=n\tpids=-\tdebug=-\topened=%s\tlast_closed=%s\n' "$prof" "${opened:-}" "${closed:-}"
+    fi
+  done < <(find "${CHROMEDATA_ROOT}" -mindepth 1 -maxdepth 1 2>/dev/null | LC_ALL=C sort)
+
+  rm -f "$merged"
+}
+
+# 上次由 browser stop 写入；手动关浏览器不会更新
+_JFCAT_LAST_CLOSE_FILE=".jfcat-cli-last-close"
+# 每次 browser start 覆盖；online -all 的 opened 在 ps 解析失败时可作回退
+_JFCAT_SESSION_STARTED_FILE=".jfcat-cli-session-started"
+
+# 进程启动时刻 -> epoch（用于取最早 opened）
+_pid_to_epoch() {
+  local pid="$1" epoch lst
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      lst="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')"
+      [[ -n "$lst" ]] || return 1
+      epoch="$(date -j -f "%a %b %d %H:%M:%S %Y" "$lst" +%s 2>/dev/null)"
+      [[ -n "$epoch" ]] || epoch="$(date -j -f "%a %b %e %H:%M:%S %Y" "$lst" +%s 2>/dev/null)"
+      ;;
+    Linux)
+      lst="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      [[ -n "$lst" ]] || return 1
+      epoch="$(date -d "$lst" +%s 2>/dev/null)"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ -n "$epoch" && "$epoch" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$epoch"
+}
+
+_epoch_to_iso_utc() {
+  local ep="$1"
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) date -u -r "$ep" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null ;;
+    Linux) date -u -d "@$ep" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null ;;
+    *) printf '%s\n' "$ep" ;;
+  esac
+}
+
+# 逗号分隔 pids -> 最早启动的 UTC ISO；失败则输出空行
+_earliest_opened_iso() {
+  local plist="$1" min_ep="" ep
+  IFS=',' read -r -a arr <<< "${plist// /}"
+  for pid in "${arr[@]}"; do
+    [[ -n "$pid" ]] || continue
+    ep="$(_pid_to_epoch "$pid")" || continue
+    if [[ -z "$min_ep" ]] || (( ep < min_ep )); then
+      min_ep="$ep"
+    fi
+  done
+  [[ -n "$min_ep" ]] || { printf '\n'; return 0; }
+  _epoch_to_iso_utc "$min_ep"
+}
+
+_read_last_closed() {
+  local prof="$1" f
+  f="${CHROMEDATA_ROOT%/}/${prof}/${_JFCAT_LAST_CLOSE_FILE}"
+  if [[ -f "$f" ]]; then
+    tr -d '\r\n' <"$f" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  fi
+}
+
+_read_session_started() {
+  local prof="$1" f
+  f="${CHROMEDATA_ROOT%/}/${prof}/${_JFCAT_SESSION_STARTED_FILE}"
+  if [[ -f "$f" ]]; then
+    tr -d '\r\n' <"$f" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  fi
+}
+
+# 判断 user-data-dir 是否落在本工具数据根下（同时试字面路径与 pwd -P）
+_under_chromedata_root() {
+  local abs="$1" root_lit="$2" root_abs="$3"
+  [[ "$abs" == "$root_abs" || "$abs" == "$root_abs"/* ]] && return 0
+  [[ "$abs" == "$root_lit" || "$abs" == "$root_lit"/* ]] && return 0
+  return 1
+}
+
+# 输出 pid + 完整命令行（尽量不换行截断）
+_ps_pid_args_lines() {
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      # macOS 上 args= 常不含完整参数；command= 才有 --user-data-dir=...
+      {
+        ps -axww -o pid= -o command= 2>/dev/null
+        ps -axww -o pid= -o args= 2>/dev/null
+      } | awk 'NF { if (!seen[$0]++) print }' || true
+      ;;
+    Linux)
+      ps axww -o pid= -o command= 2>/dev/null || ps axww -o pid= -o args= 2>/dev/null || ps -eo pid= -o command= 2>/dev/null || ps -eo pid= -o args= 2>/dev/null || true
+      ;;
+    *)
+      ps auxww 2>/dev/null | awk 'NR>1 {
+        pid=$2
+        cmd=""
+        for (i=11;i<=NF;i++) { cmd = (i>11 ? cmd " " : "") $i }
+        print pid, cmd
+      }' || true
+      ;;
+  esac
+}
+
+# 生成合并表：每行 profile<TAB>pids 逗号列表<TAB>debug 端口（可能为空）
+_browser_write_online_merged_file() {
+  local merged_out="$1"
+  local root="${CHROMEDATA_ROOT%/}"
+  local root_abs="$root"
+  if [[ -d "$root" ]]; then
+    root_abs="$(cd "$root" && pwd -P 2>/dev/null)" || root_abs="$root"
+  fi
+
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/jfcat-cli-online.XXXXXX")"
+
+  local line pid cmd ud abs prof port prof_root
+  local root_lit="${root}"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == *user-data-dir=* ]] || continue
+    [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ ]] || continue
+    pid="${BASH_REMATCH[1]}"
+    cmd="${BASH_REMATCH[2]}"
+    [[ "$cmd" =~ (^|[[:space:]])--?user-data-dir=([^[:space:]]+) ]] || continue
+    ud="${BASH_REMATCH[2]}"
+    if [[ -d "$ud" ]]; then
+      abs="$(cd "$ud" && pwd -P 2>/dev/null)" || abs="$ud"
+    else
+      abs="$ud"
+    fi
+    _under_chromedata_root "$abs" "$root_lit" "$root_abs" || continue
+    if [[ "$abs" == "$root_abs" || "$abs" == "$root_abs"/* ]]; then
+      prof_root="$root_abs"
+    else
+      prof_root="$root_lit"
+    fi
+    prof="${abs#"$prof_root"/}"
+    prof="${prof%%/*}"
+    [[ -n "$prof" ]] || continue
+    port=""
+    if [[ "$cmd" =~ (^|[[:space:]])--?remote-debugging-port=([0-9]+) ]]; then
+      port="${BASH_REMATCH[2]}"
+    fi
+    printf '%s\t%s\t%s\n' "$prof" "$pid" "$port"
+  done < <(_ps_pid_args_lines) >"$tmp"
+
+  if [[ ! -s "$tmp" ]]; then
+    : >"$merged_out"
+    rm -f "$tmp"
+    return 0
+  fi
+
+  sort -t $'\t' -k1,1 -k2,2n "$tmp" | awk -F '\t' '
+    BEGIN { prev="" }
+    {
+      if ($1 != prev) {
+        if (prev != "") printf "%s\t%s\t%s\n", prev, plist, dbg
+        prev = $1
+        plist = $2
+        dbg = ($3 != "" && $3 != "0") ? $3 : ""
+      } else {
+        plist = plist "," $2
+        if ($3 != "" && $3 != "0") dbg = $3
+      }
+    }
+    END {
+      if (prev != "") printf "%s\t%s\t%s\n", prev, plist, dbg
+    }
+  ' >"$merged_out"
+  rm -f "$tmp"
+}
+
+browser_online() {
+  local show_all=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -all|--all)
+        show_all=1
+        shift
+        ;;
+      -*)
+        echo "jfcat-cli: 未知选项: $1（online 仅支持 -all）" >&2
+        exit 1
+        ;;
+      *)
+        echo "jfcat-cli: online 不需要 profile 参数（用 -all 查看详情）" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  local merged
+  merged="$(mktemp "${TMPDIR:-/tmp}/jfcat-cli-online-m.XXXXXX")"
+  _browser_write_online_merged_file "$merged"
+
+  if [[ ! -s "$merged" ]]; then
+    rm -f "$merged"
+    echo "jfcat-cli: 当前没有使用数据根 $CHROMEDATA_ROOT 下 profile 的 Chrome 进程"
+    echo "jfcat-cli: 提示: 打开时间 opened 需「能检测到进程」且使用 browser online -all；本工具 start 会写入 .jfcat-cli-session-started 作回退" >&2
+    return 0
+  fi
+
+  if [[ "$show_all" -eq 0 ]]; then
+    cut -f1 "$merged" | sort -u
+    rm -f "$merged"
+    return 0
+  fi
+
+  echo "jfcat-cli: 数据根=$CHROMEDATA_ROOT"
+  echo "jfcat-cli: last_closed 来自上次 jfcat-cli browser stop；手动退出浏览器不会写入"
+  local prof plist dbg opened closed
+  while IFS=$'\t' read -r prof plist dbg || [[ -n "$prof" ]]; do
+    [[ -n "$prof" ]] || continue
+    opened="$(_earliest_opened_iso "$plist")"
+    [[ -z "$opened" ]] && opened="$(_read_session_started "$prof")"
+    closed="$(_read_last_closed "$prof")"
+    printf '%s\tpids=%s' "$prof" "$plist"
+    if [[ -n "$dbg" && "$dbg" != "0" ]]; then
+      printf '\tdebug=%s' "$dbg"
+    else
+      printf '\tdebug=-'
+    fi
+    printf '\topened=%s\tlast_closed=%s\n' "${opened:-}" "${closed:-}"
+  done <"$merged"
+  rm -f "$merged"
 }
 
 browser_stop() {
@@ -214,12 +586,158 @@ browser_stop() {
   local user_data="${CHROMEDATA_ROOT}/${profile}"
   local esc pattern
   esc="$(_regex_escape "$user_data")"
-  pattern="user-data-dir=${esc}"
+  # 路径后必须接空白或行尾，避免 ks1 误匹配 ks16 等更长 profile 名
+  pattern="user-data-dir=${esc}([[:space:]]|$)"
   if pkill -f "$pattern" 2>/dev/null; then
+    mkdir -p "$user_data"
+    date -u +'%Y-%m-%dT%H:%M:%SZ' >"${user_data}/${_JFCAT_LAST_CLOSE_FILE}"
     echo "jfcat-cli: 已发送结束信号: profile=$profile"
   else
     echo "jfcat-cli: 未找到使用该数据目录的 Chrome 进程: $user_data"
   fi
+}
+
+_jfcat_cli_script_dir() {
+  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+_cdp_node_runtime() {
+  printf '%s\n' "$(_jfcat_cli_script_dir)/jfcat-cdp-runtime.mjs"
+}
+
+_cdp_require_node() {
+  command -v node &>/dev/null || {
+    echo "jfcat-cli: cdp 子命令需要已安装 node（建议 18+）" >&2
+    exit 1
+  }
+}
+
+# cdp list [-p 9222 | 9222] [-H host]
+# cdp run -p PORT [-i pick] [-H host] <action> [params]
+# cdp raw -p PORT [-i pick] [-H host] <Method.name> [params]
+# cdp help-actions
+cmd_cdp() {
+  _cdp_require_node
+  local rt
+  rt="$(_cdp_node_runtime)"
+  [[ -f "$rt" ]] || {
+    echo "jfcat-cli: 缺少 $rt" >&2
+    exit 1
+  }
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    list)
+      local port="" host="127.0.0.1"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -p|--port)
+            port="$2"
+            shift 2
+            ;;
+          -H|--host)
+            host="$2"
+            shift 2
+            ;;
+          -*)
+            echo "jfcat-cli: cdp list 未知选项: $1" >&2
+            exit 1
+            ;;
+          *)
+            if [[ -z "$port" && "$1" =~ ^[0-9]+$ ]]; then
+              port="$1"
+              shift
+            else
+              echo "jfcat-cli: cdp list 多余参数: $1" >&2
+              exit 1
+            fi
+            ;;
+        esac
+      done
+      [[ -n "$port" ]] || {
+        echo "jfcat-cli: cdp list 请指定端口，例如: jfcat-cli cdp list -p 9222" >&2
+        exit 1
+      }
+      exec node "$rt" list "$port" "$host"
+      ;;
+    run)
+      local port="" pick="0" host="127.0.0.1"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -p|--port)
+            port="$2"
+            shift 2
+            ;;
+          -i|--pick)
+            pick="$2"
+            shift 2
+            ;;
+          -H|--host)
+            host="$2"
+            shift 2
+            ;;
+          -*)
+            echo "jfcat-cli: cdp run 未知选项: $1" >&2
+            exit 1
+            ;;
+          *) break ;;
+        esac
+      done
+      local action="${1:-}"
+      shift || true
+      local params="${1:-}"
+      [[ -n "$port" && -n "$action" ]] || {
+        echo "jfcat-cli: 用法: jfcat-cli cdp run -p <端口> [-i <pick>] [-H <host>] <action> [params-json|@file|-]" >&2
+        exit 1
+      }
+      params="${params:-{}}"
+      exec node "$rt" run "$port" "$pick" "$action" "$params" "$host"
+      ;;
+    raw)
+      local port="" pick="0" host="127.0.0.1"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -p|--port)
+            port="$2"
+            shift 2
+            ;;
+          -i|--pick)
+            pick="$2"
+            shift 2
+            ;;
+          -H|--host)
+            host="$2"
+            shift 2
+            ;;
+          -*)
+            echo "jfcat-cli: cdp raw 未知选项: $1" >&2
+            exit 1
+            ;;
+          *) break ;;
+        esac
+      done
+      local method="${1:-}"
+      shift || true
+      local params="${1:-}"
+      [[ -n "$port" && -n "$method" ]] || {
+        echo "jfcat-cli: 用法: jfcat-cli cdp raw -p <端口> [-i <pick>] [-H <host>] <CDP.method> [params-json|-]" >&2
+        exit 1
+      }
+      params="${params:-{}}"
+      exec node "$rt" raw "$port" "$pick" "$method" "$params" "$host"
+      ;;
+    help-actions)
+      exec node "$rt" help-actions
+      ;;
+    "")
+      echo "jfcat-cli: 请指定 cdp 子命令: list | run | raw | help-actions（见 -h）" >&2
+      exit 1
+      ;;
+    *)
+      echo "jfcat-cli: 未知 cdp 子命令: $sub" >&2
+      exit 1
+      ;;
+  esac
 }
 
 cmd_browser() {
@@ -228,6 +746,8 @@ cmd_browser() {
   case "$sub" in
     start) browser_start "$@" ;;
     stop)  browser_stop "$@" ;;
+    list)   browser_list "$@" ;;
+    online) browser_online "$@" ;;
     "")
       usage
       exit 1
@@ -245,6 +765,10 @@ main() {
     browser)
       shift
       cmd_browser "$@"
+      ;;
+    cdp)
+      shift
+      cmd_cdp "$@"
       ;;
     -h|--help|help)
       usage

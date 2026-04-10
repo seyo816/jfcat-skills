@@ -46,7 +46,16 @@ openskills install seyo816/jfcat-skills -g -u -y
 openskills install seyo816/jfcat-skills/jfcat-cli -g -y
 
 openskills list
+
+#cursor使用技能，到你的项目内
 openskills sync -o AGENTS.md -y   # 可选（多在项目根配合 -u 使用）
+mkdir -p .cursor/skills
+ln -sf ~/.agent/skills/jfcat-cli "$(pwd)/.cursor/skills/jfcat-cli"
+
+#openclaw
+mkdir -p ~/.openclaw/skills
+cp -rf ~/.agent/skills/jfcat-* ~/.openclaw/skills/
+
 ```
 
 `-y`：跳过交互；`-u`：**universal**，写入 **`.agent/skills`**（项目内为 `./.agent/skills`，全局为 **`~/.agent/skills`**）；`-g`：**global**，写入用户目录下的 **`.claude/skills`** 或与 `-u` 组合写入 **`~/.agent/skills`**。
@@ -82,8 +91,12 @@ export PATH="/path/to/本仓库/jfcat-cli:$PATH"
 # 或：ln -s /path/to/本仓库/jfcat-cli/jfcat-cli /usr/local/bin/jfcat-cli
 
 jfcat-cli -h
-jfcat-cli browser start <profile> [-p <端口>]
+jfcat-cli browser start <profile> [-p <端口>]   # 默认后台，终端立即返回；前台见 JFCAT_BROWSER_FOREGROUND
 jfcat-cli browser stop <profile>
+jfcat-cli browser list   # 等同 ls ~/.chromedata（可用 JFCAT_LIST_LS_FLAGS=-1 每行一个）
+jfcat-cli browser list -all   # 数据根下每项详情（含未运行 profile；find 排序）
+jfcat-cli browser online       # 仅 profile 名
+jfcat-cli browser online -all  # pids、debug、opened、last_closed；opened 优先 ps，否则读 .jfcat-cli-session-started（每次 start 写入）
 ```
 
 - 数据：`~/.chromedata/<profile>`（`JFCAT_CHROMEDATA_ROOT`）；`-p` 才开远程调试。  
