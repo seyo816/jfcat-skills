@@ -1,148 +1,93 @@
-# jfcat 仓库 · `skills/` 说明
+# jfcat skills
 
-本目录存放 **可给 Agent 使用的技能包**（每个子目录一个独立包，根文件为 `SKILL.md`）。
+本仓库是 **jfcat 官方技能合集**：每个子目录 = 一个技能包，根文件为 **`SKILL.md`**，供 **Claude Code、Cursor、OpenClaw** 等通过「读 SKILL + 可选脚本」增强 Agent 能力。
+
+**用途概览**
+
+- 描述本机工具链（如 **`jfcat-cli`**：独立 Chrome profile、远程调试端口）。
+- 与 **jfcat 浏览器扩展 / API / OpenClaw MCP** 协作时，给模型可检索的操作约定（**`jfcat-plugin`** 预留）。
+
 
 | 技能 | 说明 |
 |------|------|
-| **jfcat-cli** | 已实现：本机 Chrome 多 profile / 远程调试 CLI |
-| **jfcat-plugin** | **预留**：浏览器扩展（plugin）相关说明，待补充具体内容 |
+| **jfcat-cli** | 本机 Chrome 多 profile / 可选 `--remote-debugging-port` |
+| **jfcat-plugin** | 配合JFCAT CHROME V3插件：扩展侧（`content/`、心跳、与 API 对照等） |
 
-> **与 openskills 的关系**：执行 `openskills install ./skills/jfcat-cli` 时，工具会**递归复制整个 `skills/jfcat-cli/`** 到 `.claude/skills` 或 `.agent/skills`。  
-> **本文件 `skills/README.md` 位于技能包上一级**，不会被复制进上述安装目录；完整人机说明写在这里，避免污染 Agent 技能目录。
+---
 
-### 为何不要在 `skills/` 根目录放 `SKILL.md`？
+## 各工具如何接入（Claude / Cursor / OpenClaw）
 
-openskills 规则是：
+| 工具 / 场景 | 做法 |
+|-------------|------|
+| **openskills + Claude Code** | 默认装到项目 **`.claude/skills/<技能名>/`**，与 Claude Code 技能目录一致。 |
+| **openskills + 通用 AGENTS** | 加 **`-u`** 装到 **`.agent/skills/`**，再用 `openskills sync` 更新 **`AGENTS.md`**，便于 Cursor 等读项目级说明。 |
+| **Cursor（项目技能）** | 将 **`jfcat-cli`** 等目录 **符号链接或复制** 到 **`.cursor/skills/<技能名>/`**，或依赖上述 **`AGENTS.md`**。 |
+| **OpenClaw 网关** | 将 **`jfcat-cli`** 等目录 **复制或符号链接** 到 **`~/.openclaw/skills/<技能名>/`**|
 
-- **`skills/SKILL.md` 若存在**：整份 `skills/` 会被当作 **一个** 技能包装进去（名称取自 frontmatter），**不再**扫描子目录里的 `jfcat-cli`、`jfcat-plugin` 等，你会失去「多包一次装」的行为。
-- **`skills/SKILL.md` 不存在**：`openskills install ./skills` 会 **递归发现** 每个子目录里的 `SKILL.md`，一次装上 **全部** 技能（多选或 `-y` 全选）。
+以上可同时使用：例如 openskills 管 Claude/AGENTS，OpenClaw 将技能放进 **`~/.openclaw/skills`** 并在 `extraDirs` 中注册该目录。
 
-因此：**「一次性总安装」= 不要建根级 `SKILL.md`，直接执行：**
+---
+
+## openskills（从 GitHub 安装）
+
+需已安装 [openskills](https://www.npmjs.com/package/openskills)（如 `npm i -g openskills`）。在**目标项目根目录**执行：
 
 ```bash
-cd /path/to/jfcat
-openskills install ./skills -y
+# 安装本仓库内全部技能（多包时 -y 表示全选）
+openskills install seyo816/jfcat-skills -y
+
+# 装到 .agent/skills，便于 sync 生成 AGENTS.md（Cursor / 通用）
+openskills install seyo816/jfcat-skills -u -y
+
+# 只装某一个（子路径）
+openskills install seyo816/jfcat-skills/jfcat-cli -y
+
+openskills list
+openskills sync -o AGENTS.md -y   # 可选
 ```
 
-人类可读的总说明用 **`README.md`**（当前文件）即可，不要用 `SKILL.md` 代替。
+`-y`：跳过交互；`-u`：**universal**，写入 `.agent/skills`。
 
 ---
 
-## jfcat 项目上下文（简要）
+## 不经过 openskills（复制 / 链目录）
 
-| 区域 | 说明 |
-|------|------|
-| 浏览器扩展 | `content/`、`release/` 等，抖店等页面自动化 |
-| 后端 API | 独立仓库 `jfcat-api`，含 AI、XMAD、MCP 公钥接口等 |
-| OpenClaw | `openclaw-mcp/`、`openclaw-skill-extension-registry/`（网关 MCP、技能索引，**勿**把整个 jfcat 根目录当作 OpenClaw `extraDirs`） |
-| 本 CLI | `jfcat-cli`：本机 Chrome 多 profile / 远程调试，与扩展、CDP、本地脚本配合 |
-
----
-
-## jfcat-plugin（预留）
-
-`skills/jfcat-plugin/` 目前仅 **`SKILL.md`**，用于将来集中写 **浏览器扩展（plugin）** 侧约定（`content/`、构建、与 API/OpenClaw 对照等）。安装方式与 `jfcat-cli` 相同：直接符号链接到 `.cursor/skills` / `.claude/skills`，或 `openskills install ./skills/jfcat-plugin -y`。
-
----
-
-## jfcat-cli
-
-### 目录布局
-
-```
-skills/jfcat-cli/
-├── SKILL.md      # Agent 用：核心行为（精简）
-├── jfcat-cli     # 可执行总入口（转发到 bin/jfcat-cli）
-└── bin/jfcat-cli # Bash 实现（browser start/stop、Chrome 探测等）
-```
-
-### 用法摘要
+把克隆下来的 **`jfcat-cli`**（或任意 `/<技能名>`）**复制**（`cp -a`）或**符号链接**（`ln -sf`）到对应目录即可：
 
 ```bash
-# 将本 skill 目录加入 PATH（示例）
-export PATH="/path/to/jfcat/skills/jfcat-cli:$PATH"
+# Cursor（路径按本机修改）
+ln -sf /path/to/jfcat-skills/jfcat-cli /path/to/project/.cursor/skills/jfcat-cli
+
+# Claude Code
+ln -sf /path/to/jfcat-skills/jfcat-cli /path/to/project/.claude/skills/jfcat-cli
+
+# OpenClaw：放到用户目录下，再在 openclaw.json 的 extraDirs 里加入本目录的绝对路径
+mkdir -p ~/.openclaw/skills
+ln -sf /path/to/jfcat-skills/jfcat-cli ~/.openclaw/skills/jfcat-cli
+# 示例：在 skills.load.extraDirs 中增加一项（请换成你本机展开后的路径）
+# "/Users/你的用户名/.openclaw/skills"
+```
+
+也可用 **`cp -a /path/to/jfcat-skills/jfcat-cli ~/.openclaw/skills/`** 做物理复制（不依赖原克隆路径）。
+
+---
+
+## jfcat-cli（命令行）
+
+```bash
+export PATH="/path/to/本仓库/jfcat-cli:$PATH"
+# 或：ln -s /path/to/本仓库/jfcat-cli/jfcat-cli /usr/local/bin/jfcat-cli
 
 jfcat-cli -h
-jfcat-cli -v
 jfcat-cli browser start <profile> [-p <端口>]
 jfcat-cli browser stop <profile>
 ```
 
-- **数据目录**：`~/.chromedata/<profile>`（可用 `JFCAT_CHROMEDATA_ROOT` 改根路径）。
-- **`-p`**：启用 `remote-debugging-port`；不传则不开调试端口。
-- **Chrome 路径**：未设置 `JFCAT_CHROME` 时自动探测 macOS / Linux / Windows（Git Bash）；仍失败则手动指定可执行文件路径。
-
-### 环境变量
-
-| 变量 | 含义 |
-|------|------|
-| `JFCAT_CHROMEDATA_ROOT` | 用户数据根目录，默认 `$HOME/.chromedata` |
-| `JFCAT_CHROME` | Chrome/Chromium 可执行文件（可选） |
+- 数据：`~/.chromedata/<profile>`（`JFCAT_CHROMEDATA_ROOT`）；`-p` 才开远程调试。  
+- `JFCAT_CHROME`：可选，指定浏览器可执行文件。
 
 ---
 
-## 直接安装（不经过 openskills）
+## 新增技能
 
-把本仓库里的 skill **复制**或**符号链接**到各工具约定的目录即可，无需安装 Node / openskills。下面路径请把 `/path/to/jfcat` 换成你本机克隆根目录。
-
-### Cursor（项目内技能）
-
-```bash
-mkdir -p /path/to/your-project/.cursor/skills
-ln -sf /path/to/jfcat/skills/jfcat-cli /path/to/your-project/.cursor/skills/jfcat-cli
-# 或复制：cp -a /path/to/jfcat/skills/jfcat-cli /path/to/your-project/.cursor/skills/
-```
-
-### Claude Code（`.claude/skills`）
-
-```bash
-mkdir -p /path/to/your-project/.claude/skills
-ln -sf /path/to/jfcat/skills/jfcat-cli /path/to/your-project/.claude/skills/jfcat-cli
-```
-
-### 通用 `.agent/skills`（若你的工作流会读该目录）
-
-```bash
-mkdir -p /path/to/your-project/.agent/skills
-ln -sf /path/to/jfcat/skills/jfcat-cli /path/to/your-project/.agent/skills/jfcat-cli
-```
-
-### OpenClaw
-
-无需复制 skill 目录：在 `~/.openclaw/openclaw.json` 的 `skills.load.extraDirs` 里加入 **`/path/to/jfcat/skills/jfcat-cli` 的绝对路径**（与 `openclaw-skill-extension-registry` 并列）。网关会扫描该目录下的 `SKILL.md`。
-
-### jfcat-cli 命令行（终端里直接敲 `jfcat-cli`）
-
-与「技能安装」无关，只要把可执行入口加入 PATH 或做全局链接：
-
-```bash
-chmod +x /path/to/jfcat/skills/jfcat-cli/jfcat-cli
-ln -sf /path/to/jfcat/skills/jfcat-cli/jfcat-cli /usr/local/bin/jfcat-cli
-# 或：export PATH="/path/to/jfcat/skills/jfcat-cli:$PATH"
-```
-
----
-
-## 通过 openskills 安装（可选）
-
-在 **jfcat 仓库根**执行（需已 `npm i -g openskills`）。`-y` 跳过交互；`-u` 装到 `./.agent/skills`。
-
-```bash
-cd /path/to/jfcat
-openskills install ./skills/jfcat-cli -y          # → ./.claude/skills/jfcat-cli
-openskills install ./skills/jfcat-cli -u -y       # → ./.agent/skills/jfcat-cli
-openskills list
-openskills sync -o AGENTS.md -y
-```
-
-安装副本中含 `SKILL.md`、`bin/jfcat-cli`、`jfcat-cli` 入口；**不含** `skills/README.md`。
-
-### Cursor（与 openskills 二选一）
-
-可用上面「直接安装」链到 `.cursor/skills`，或依赖 `openskills sync` 生成的 `AGENTS.md`。
-
----
-
-## 新增技能包
-
-新建 `skills/<name>/SKILL.md`（及所需脚本）。安装任选其一：**直接**把 `skills/<name>` 链到 `.cursor/skills/` / `.claude/skills/`（见上文「直接安装」），或在仓库根执行 `openskills install ./skills/<name> -y`。约定以 [openskills](https://www.npmjs.com/package/openskills) 为准。
+新建 **`/<name>/SKILL.md`**（及脚本），提交到本仓库；他人通过 **`openskills install seyo816/jfcat-skills`** 或子路径安装，或复制/链到 **`.cursor/skills`**、**`.claude/skills`**、**`~/.openclaw/skills`** 。
