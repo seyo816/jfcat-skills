@@ -3,7 +3,7 @@
 set -euo pipefail
 
 # 固定版本（仅脚本内，无环境变量）
-_JFCAT_CLI_VER=0.2.1
+_JFCAT_CLI_VER=0.2.2
 
 CHROMEDATA_ROOT="${JFCAT_CHROMEDATA_ROOT:-$HOME/.chromedata}"
 # 支持 JFCAT_CHROMEDATA_ROOT=~/foo
@@ -151,7 +151,8 @@ jfcat-cli $_JFCAT_CLI_VER
           -p <端口>  指定 remote-debugging-port；不传 -p 则不启用调试端口。
           若该 profile 已有 Chrome 在使用同一数据目录，则不再启动新进程，直接退出（0）。
           启动时会尽量恢复上次会话标签页（--restore-last-session，且依赖同一 profile）。
-          默认后台启动，命令立即返回；需要占住终端并看 Chrome 日志时设 JFCAT_BROWSER_FOREGROUND=1。
+          默认后台启动，命令立即返回（macOS/Linux 用 nohup；Windows Git Bash/MSYS 用 cmd start 分离进程，避免挂住终端）。
+          需要占住终端并看 Chrome 日志时设 JFCAT_BROWSER_FOREGROUND=1。
 
   stop    结束使用该 profile 数据目录的 Chrome 进程。
 
@@ -182,6 +183,37 @@ EOF
 
 version_info() {
   printf '%s\n' "jfcat-cli $_JFCAT_CLI_VER"
+}
+
+# Git Bash / MSYS / Cygwin：与 Unix 不同，nohup 常不可用或仍会占住控制台
+_is_windows_git_bash() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+  esac
+  case "${OSTYPE:-}" in
+    msys|cygwin) return 0 ;;
+  esac
+  return 1
+}
+
+# Windows 下用 cmd start 分离子进程，终端立即返回（不等待 Chrome 退出）
+_browser_start_background_windows() {
+  local chrome_exe="$1"
+  shift
+  local -a launch_args=("$@")
+  local chrome_w
+  if command -v cygpath &>/dev/null; then
+    chrome_w="$(cygpath -w "$chrome_exe" 2>/dev/null)" || chrome_w=""
+  else
+    chrome_w=""
+  fi
+  [[ -n "$chrome_w" ]] || chrome_w="$chrome_exe"
+  if ! command -v cmd.exe &>/dev/null; then
+    echo "jfcat-cli: 未找到 cmd.exe，无法用 start 后台启动 Chrome" >&2
+    return 1
+  fi
+  # 禁止 MSYS 把 --user-data-dir=/c/... 等参数误转换
+  MSYS2_ARG_CONV_EXCL='*' cmd.exe //c start "" "$chrome_w" "${launch_args[@]}" </dev/null >/dev/null 2>&1
 }
 
 browser_start() {
@@ -248,6 +280,14 @@ browser_start() {
     exec "$chrome" "${args[@]}"
   fi
   # 后台启动：终端立即返回；关闭浏览器时不再占住当前 shell（此前 exec 会继承 stdio 并长期挂起）
+  if _is_windows_git_bash; then
+    if _browser_start_background_windows "$chrome" "${args[@]}"; then
+      echo "jfcat-cli: 已在后台启动（Windows: cmd start 分离进程）"
+    else
+      exit 1
+    fi
+    return 0
+  fi
   nohup "$chrome" "${args[@]}" </dev/null >/dev/null 2>&1 &
   local chrome_pid=$!
   disown "$chrome_pid" 2>/dev/null || true
