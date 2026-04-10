@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# jfcat-cli — 实现脚本（由上级目录的 jfcat-cli 入口调用）
+set -euo pipefail
+
+# 固定版本（仅脚本内，无环境变量）
+_JFCAT_CLI_VER=0.1.0
+
+CHROMEDATA_ROOT="${JFCAT_CHROMEDATA_ROOT:-$HOME/.chromedata}"
+
+# 若路径存在且可执行（Windows .exe 在 Git Bash 下 -x 通常可用）
+_chrome_executable() {
+  [[ -n "$1" && -e "$1" ]] && [[ -x "$1" || "$1" == *.exe ]]
+}
+
+# Git Bash / MSYS：常见安装路径与 %LOCALAPPDATA% / %USERPROFILE% 推导（Bash 3.2 兼容）
+_chrome_try_windows_paths() {
+  local p drive rest
+  for p in \
+    "/c/Program Files/Google/Chrome/Application/chrome.exe" \
+    "/c/Program Files (x86)/Google/Chrome/Application/chrome.exe"
+  do
+    if [[ -e "$p" ]]; then
+      echo "$p"
+      return 0
+    fi
+  done
+  # C:\Users\...\AppData\Local → .../Google/Chrome/Application/chrome.exe
+  if [[ -n "${LOCALAPPDATA:-}" ]] && [[ "$LOCALAPPDATA" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+    drive="${BASH_REMATCH[1]}"
+    rest="${BASH_REMATCH[2]//\\//}"
+    drive=$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')
+    p="/${drive}/${rest}/Google/Chrome/Application/chrome.exe"
+    if [[ -e "$p" ]]; then
+      echo "$p"
+      return 0
+    fi
+  fi
+  if [[ -n "${USERPROFILE:-}" ]] && [[ "$USERPROFILE" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+    drive="${BASH_REMATCH[1]}"
+    rest="${BASH_REMATCH[2]//\\//}"
+    drive=$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')
+    p="/${drive}/${rest}/AppData/Local/Google/Chrome/Application/chrome.exe"
+    if [[ -e "$p" ]]; then
+      echo "$p"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# 自动解析本机 Chrome/Chromium；优先 JFCAT_CHROME，其次常见路径，最后 PATH
+chrome_bin() {
+  if [[ -n "${JFCAT_CHROME:-}" ]]; then
+    if _chrome_executable "$JFCAT_CHROME"; then
+      echo "$JFCAT_CHROME"
+      return 0
+    fi
+    echo "jfcat-cli: JFCAT_CHROME 不是可用的 Chrome 路径: $JFCAT_CHROME" >&2
+    exit 1
+  fi
+
+  local p uname_s
+  uname_s="$(uname -s 2>/dev/null || echo "")"
+
+  case "$uname_s" in
+    Darwin)
+      for p in \
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" \
+        "/Applications/Chromium.app/Contents/MacOS/Chromium"
+      do
+        if _chrome_executable "$p"; then
+          echo "$p"
+          return 0
+        fi
+      done
+      ;;
+    Linux)
+      # Debian/Ubuntu、Fedora/CentOS 官方包、snap 等常见位置
+      for p in \
+        "/usr/bin/google-chrome-stable" \
+        "/usr/bin/google-chrome" \
+        "/opt/google/chrome/google-chrome" \
+        "/usr/bin/chromium-browser" \
+        "/usr/bin/chromium" \
+        "/snap/bin/chromium" \
+        "/var/lib/flatpak/exports/bin/com.google.Chrome" \
+        "/var/lib/flatpak/exports/bin/org.chromium.Chromium"
+      do
+        if _chrome_executable "$p"; then
+          echo "$p"
+          return 0
+        fi
+      done
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      if p="$(_chrome_try_windows_paths)"; then
+        echo "$p"
+        return 0
+      fi
+      ;;
+  esac
+
+  # 部分环境 uname 不显示 MINGW，再用 OSTYPE 试 Windows
+  case "${OSTYPE:-}" in
+    msys|cygwin)
+      if p="$(_chrome_try_windows_paths)"; then
+        echo "$p"
+        return 0
+      fi
+      ;;
+  esac
+
+  for p in google-chrome-stable google-chrome chromium chromium-browser chrome; do
+    if command -v "$p" &>/dev/null; then
+      command -v "$p"
+      return 0
+    fi
+  done
+
+  echo "jfcat-cli: 未找到 Chrome/Chromium，请安装浏览器或设置环境变量 JFCAT_CHROME 为可执行路径" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<EOF
+jfcat-cli $_JFCAT_CLI_VER
+
+用法:
+  jfcat-cli [-h | --help] [-v | --version]
+  jfcat-cli browser start <profile> [-p <端口>]
+  jfcat-cli browser stop <profile>
+
+全局选项:
+  -h, --help      显示本帮助
+  -v, --version   显示版本号
+
+子命令 browser:
+  start   使用 ~/.chromedata/<profile> 作为用户数据目录启动 Chrome。
+          -p <端口>  开启远程调试（remote-debugging-port）；不传 -p 则不启用调试端口。
+          启动时会尽量恢复上次会话标签页（--restore-last-session，且依赖同一 profile）。
+
+  stop    结束使用该 profile 数据目录的 Chrome 进程。
+
+环境变量:
+  JFCAT_CHROMEDATA_ROOT  数据根目录，默认 ~/.chromedata
+  JFCAT_CHROME           Chrome 可执行文件（可选；不设则自动探测 macOS / Linux / Windows）
+EOF
+}
+
+version_info() {
+  printf '%s\n' "jfcat-cli $_JFCAT_CLI_VER"
+}
+
+browser_start() {
+  local profile="" port=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p)
+        [[ $# -ge 2 ]] || { echo "jfcat-cli: -p 需要端口号" >&2; exit 1; }
+        port="$2"
+        shift 2
+        ;;
+      -*)
+        echo "jfcat-cli: 未知选项: $1" >&2
+        usage
+        exit 1
+        ;;
+      *)
+        if [[ -z "$profile" ]]; then
+          profile="$1"
+        else
+          echo "jfcat-cli: 多余的参数: $1" >&2
+          exit 1
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$profile" ]] || { echo "jfcat-cli: 请指定 profile，例如: jfcat-cli browser start ks1" >&2; exit 1; }
+
+  local chrome user_data
+  chrome="$(chrome_bin)"
+  user_data="${CHROMEDATA_ROOT}/${profile}"
+  mkdir -p "$user_data"
+
+  local args=(
+    "--user-data-dir=$user_data"
+    "--no-first-run"
+    "--no-default-browser-check"
+    "--restore-last-session"
+  )
+  if [[ -n "$port" ]]; then
+    args+=("--remote-debugging-port=$port")
+  fi
+
+  echo "jfcat-cli: 启动 Chrome profile=$profile user-data-dir=$user_data${port:+  remote-debugging-port=$port}"
+  exec "$chrome" "${args[@]}"
+}
+
+_regex_escape() {
+  printf '%s' "$1" | sed 's/[.^$*+?()[{|\\]/\\&/g'
+}
+
+browser_stop() {
+  local profile="${1:-}"
+  [[ -n "$profile" ]] || { echo "jfcat-cli: 请指定 profile，例如: jfcat-cli browser stop ks1" >&2; exit 1; }
+  if [[ $# -gt 1 ]]; then
+    echo "jfcat-cli: stop 只需要一个 profile 参数" >&2
+    exit 1
+  fi
+
+  local user_data="${CHROMEDATA_ROOT}/${profile}"
+  local esc pattern
+  esc="$(_regex_escape "$user_data")"
+  pattern="user-data-dir=${esc}"
+  if pkill -f "$pattern" 2>/dev/null; then
+    echo "jfcat-cli: 已发送结束信号: profile=$profile"
+  else
+    echo "jfcat-cli: 未找到使用该数据目录的 Chrome 进程: $user_data"
+  fi
+}
+
+cmd_browser() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    start) browser_start "$@" ;;
+    stop)  browser_stop "$@" ;;
+    "")
+      usage
+      exit 1
+      ;;
+    *)
+      echo "jfcat-cli: 未知子命令: browser $sub" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main() {
+  case "${1:-}" in
+    browser)
+      shift
+      cmd_browser "$@"
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    -v|--version)
+      version_info
+      ;;
+    "")
+      usage
+      exit 1
+      ;;
+    *)
+      echo "jfcat-cli: 未知命令: $1（试试 -h）" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

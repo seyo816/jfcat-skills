@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# 总入口：与本目录 bin/jfcat-cli 同目录，可加入 PATH 或符号链接到 /usr/local/bin
+set -euo pipefail
+_jfcat_cli_skill_root() {
+  local s="${BASH_SOURCE[0]}"
+  while [[ -L "$s" ]]; do
+    local d
+    d="$(cd "$(dirname "$s")" && pwd)"
+    s="$(readlink "$s")"
+    [[ "$s" != /* ]] && s="$d/$s"
+  done
+  cd "$(dirname "$s")" && pwd
+}
+exec "$(_jfcat_cli_skill_root)/bin/jfcat-cli" "$@"
