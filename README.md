@@ -30,23 +30,26 @@
 
 ## openskills（从 GitHub 安装）
 
-需已安装 [openskills](https://www.npmjs.com/package/openskills)（如 `npm i -g openskills`）。在**目标项目根目录**执行：
+需已安装 [openskills](https://www.npmjs.com/package/openskills)（如 `npm i -g openskills`）。**项目内**安装在目标项目根执行；**全局**安装可在任意目录执行（写入用户主目录）。
 
 ```bash
-# 安装本仓库内全部技能（多包时 -y 表示全选）
+# --- 项目内（默认 ~/.claude/skills 指项目下 ./.claude/skills）---
 openskills install seyo816/jfcat-skills -y
-
-# 装到 .agent/skills，便于 sync 生成 AGENTS.md（Cursor / 通用）
-openskills install seyo816/jfcat-skills -u -y
-
-# 只装某一个（子路径）
+openskills install seyo816/jfcat-skills -u -y   # → 项目 ./.agent/skills
 openskills install seyo816/jfcat-skills/jfcat-cli -y
 
+# --- 全局（所有项目可用；路径为 ~/.claude/skills 或 ~/.agent/skills）---
+openskills install seyo816/jfcat-skills -g -y
+openskills install seyo816/jfcat-skills -g -u -y
+
+# 全局只装某一个
+openskills install seyo816/jfcat-skills/jfcat-cli -g -y
+
 openskills list
-openskills sync -o AGENTS.md -y   # 可选
+openskills sync -o AGENTS.md -y   # 可选（多在项目根配合 -u 使用）
 ```
 
-`-y`：跳过交互；`-u`：**universal**，写入 `.agent/skills`。
+`-y`：跳过交互；`-u`：**universal**，写入 **`.agent/skills`**（项目内为 `./.agent/skills`，全局为 **`~/.agent/skills`**）；`-g`：**global**，写入用户目录下的 **`.claude/skills`** 或与 `-u` 组合写入 **`~/.agent/skills`**。
 
 ---
 
